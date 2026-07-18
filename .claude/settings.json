@@ -1,0 +1,6 @@
+{
+  "autoCompactWindow": 150000,
+  "permissions": {
+    "deny": ["Bash(rm -rf /)"]
+  }
+}
