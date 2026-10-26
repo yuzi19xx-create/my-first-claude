@@ -311,19 +311,44 @@ def burn(video, cues, out, width, ypos=0.86, telops=None, telop_ja=None,
         p = os.path.join(tmp, "cover.png")
         img.save(p)
         spans = [(0, 1e6, p)] + spans
-    inputs = ["-i", video]
-    for _, _, p in spans:
-        inputs += ["-i", p]
-    chain, last = [], "0:v"
-    for i, (st, en, _) in enumerate(spans):
-        nxt = f"v{i}"
-        chain.append(f"[{last}][{i + 1}:v]overlay=0:0:"
-                     f"enable='gte(t,{st:.2f})*lt(t,{en:.2f})'[{nxt}]")
-        last = nxt
-    run(["ffmpeg", "-loglevel", "error", "-y", *inputs,
-         "-filter_complex", ";".join(chain), "-map", f"[{last}]", "-map", "0:a?",
-         "-c:v", "libx264", "-crf", "20", "-pix_fmt", "yuv420p",
-         "-c:a", "copy", out])
+    full = [x for x in spans if x[1] < 1e5]
+    fixed = [x for x in spans if x[1] >= 1e5]  # 全編に出す帯
+    dur = _duration(video)
+    CH = 40  # ffmpegに一度に渡す重ね合わせ数(多すぎると失敗するので時間で分割)
+    if len(full) <= CH:
+        windows = [(0.0, dur, spans)]
+    else:
+        windows, a = [], 0.0
+        for k in range(0, len(full), CH):
+            grp = full[k:k + CH]
+            b = full[k + CH][0] if k + CH < len(full) else dur
+            b = max(b, max(g[1] for g in grp) if k + CH >= len(full) else b)
+            windows.append((a, b, fixed + [g for g in grp if g[0] < b]))
+            a = b
+    parts = []
+    for w, (a, b, sp) in enumerate(windows):
+        inputs = ["-ss", f"{a:.3f}", "-t", f"{b - a:.3f}", "-i", video]
+        for _, _, p in sp:
+            inputs += ["-i", p]
+        chain, last = [], "0:v"
+        for i, (st, en, _) in enumerate(sp):
+            nxt = f"v{i}"
+            chain.append(f"[{last}][{i + 1}:v]overlay=0:0:"
+                         f"enable='gte(t,{max(st - a, 0):.2f})*lt(t,{en - a:.2f})'[{nxt}]")
+            last = nxt
+        if len(windows) == 1:
+            dest, audio = out, ["-c:a", "copy"]
+        else:
+            dest, audio = os.path.join(tmp, f"part_{w:03}.mp4"), ["-c:a", "aac", "-b:a", "128k"]
+            parts.append(dest)
+        run(["ffmpeg", "-loglevel", "error", "-y", *inputs,
+             "-filter_complex", ";".join(chain), "-map", f"[{last}]", "-map", "0:a?",
+             "-c:v", "libx264", "-crf", "20", "-pix_fmt", "yuv420p", *audio, dest])
+    if parts:
+        lst = os.path.join(tmp, "parts.txt")
+        open(lst, "w").write("".join(f"file '{x}'\n" for x in parts))
+        run(["ffmpeg", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0",
+             "-i", lst, "-c", "copy", out])
 
 
 def _duration(path):
