@@ -78,6 +78,22 @@ $PY $S build $W/segments.json $W/translations.json --outdir $W --burn $W/video.m
 
 1区間内で改行したい場合は `\n` を入れる(入れなければ `--width` で自動折り返し)。
 
+## 動画内の英語テロップも訳す(任意・ユーザーが望んだ時だけ)
+
+OCRはmacOS Vision(ローカル実行・トークン消費なし)。`pyobjc-framework-Vision pyobjc-framework-Quartz` が必要。
+
+```bash
+$PY $S telop $W/video.mp4 --outdir $W --ymin 0.6 --ymax 0.9 --min-text-height 0.03   # → $W/telops.json
+# Claudeが $W/telop_translations.json を書く
+$PY $S build $W/segments.json $W/translations.json --outdir $W --burn $W/video.mp4 \
+   --telops $W/telops.json --telop-translations $W/telop_translations.json
+```
+
+- **OCRはテロップ以外も拾う**(操作画面のUI・ロゴ・写り込んだ文字)。必ず `--ymin/--ymax`(テロップの高さの帯)と `--min-text-height` で絞る。帯は動画のフレームを1枚見て決める。
+- **トークン節約**: `telops.json` を丸ごと読まない。`head` で先頭数件と件数だけ確認する。テロップが話している内容とほぼ同じ字幕(カラオケ風)なら、音声の字幕で足りるので訳さずユーザーに伝える。訳すのは、音声に無い情報(見出し・数字・注意書き)だけ。
+- 翻訳は、訳すテロップの `id` と `text` だけを短く抜き出して読み、`telop_translations.json` に書く(未翻訳のidがあるとbuildが止まる。訳さないものは `telops.json` から外す)。
+- 焼き込みは、元のテロップ位置を黒い帯で隠して日本語を重ねる。背景の絵柄は隠れる。
+
 ## 確認と報告
 
 - `build` が `translations.json に訳が無いid` で止まったら、足りないidを訳して再実行する。
