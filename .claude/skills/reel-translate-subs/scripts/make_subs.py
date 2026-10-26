@@ -416,6 +416,10 @@ def cmd_erase(a):
     print(out)
 
 
+# 「人」「やり方」の「方」は「かた」。合成音声が「ほう」と読むのを防ぐ(比較の「〜した方が」、方法・方向・両方などは触らない)
+_KATA = re.compile(r"(?<![そこあどの両地])方(?=[はもにへのをで、。]|向け|なら)")
+
+
 def cmd_dub(a):
     segs = json.load(open(a.segments, encoding="utf-8"))
     ja = load_translations(a.translations, len(segs))
@@ -425,7 +429,7 @@ def cmd_dub(a):
     tmp = tempfile.mkdtemp(prefix="dub_")
     clips, warn = [], []
     for i, c in enumerate(cues):
-        text = c["ja"].replace("\n", "")
+        text = _KATA.sub("かた", c["ja"].replace("\n", ""))
         for src, dst in readings:
             text = text.replace(src, dst)
         if a.engine == "voicevox":
