@@ -4,8 +4,11 @@
 サブコマンド:
   fetch       URLから動画を取得する(yt-dlp + node)
   transcribe  動画から英語音声を文字起こしし、segments.json を作る
+  telop       動画内の英語テロップをOCR(macOS Vision)して telops.json を作る
   build       segments.json + translations.json から字幕ファイルを作る
               --burn を付けると字幕焼き込みmp4も作る
+              --telops / --telop-translations を付けると、テロップも元の位置に
+              日本語で上書きして焼き込む
 
 翻訳(英語→日本語)はこのスクリプトではやらない。Claudeが segments.json を読み、
 文脈をまとめて訳した translations.json を書く。
@@ -13,6 +16,7 @@
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -139,7 +143,107 @@ def write_vtt(cues, path, width=20):
                     f"{wrap(c['ja'], width)}\n\n")
 
 
-def burn(video, cues, out, width, ypos=0.86):
+def _ocr_boxes(path, min_height, ymin=0.0, ymax=1.0):
+    """1枚の画像からテキスト行と位置を取る。位置は左上原点の0〜1の比率 [x, y, w, h]。"""
+    import Quartz
+    import Vision
+    from Foundation import NSURL
+    src = Quartz.CGImageSourceCreateWithURL(NSURL.fileURLWithPath_(path), None)
+    img = Quartz.CGImageSourceCreateImageAtIndex(src, 0, None)
+    req = Vision.VNRecognizeTextRequest.alloc().init()
+    req.setRecognitionLanguages_(["en"])
+    req.setUsesLanguageCorrection_(True)
+    h = Vision.VNImageRequestHandler.alloc().initWithCGImage_options_(img, None)
+    ok, _ = h.performRequests_error_([req], None)
+    if not ok:
+        return []
+    out = []
+    for obs in req.results():
+        cand = obs.topCandidates_(1)
+        b = obs.boundingBox()
+        if not cand or b.size.height < min_height:
+            continue
+        cy = 1 - b.origin.y - b.size.height / 2
+        if not ymin <= cy <= ymax:
+            continue
+        out.append((str(cand[0].string()), b.origin.x, 1 - b.origin.y - b.size.height,
+                    b.size.width, b.size.height))
+    return out
+
+
+def cmd_telop(a):
+    os.makedirs(a.outdir, exist_ok=True)
+    frames = os.path.join(a.outdir, "telop_frames")
+    os.makedirs(frames, exist_ok=True)
+    for f in os.listdir(frames):
+        os.remove(os.path.join(frames, f))
+    run(["ffmpeg", "-loglevel", "error", "-y", "-i", a.video, "-vf", f"fps={a.fps}",
+         os.path.join(frames, "f_%05d.png")])
+    per = []  # フレームごと: (time, 正規化テキスト, 行リスト)
+    for fn in sorted(os.listdir(frames)):
+        t = (int(re.search(r"(\d+)", fn).group(1)) - 1) / a.fps
+        lines = _ocr_boxes(os.path.join(frames, fn), a.min_text_height, a.ymin, a.ymax)
+        per.append((t, re.sub(r"\W+", "", "".join(l[0] for l in lines)).lower(), lines))
+    telops, i, dt = [], 0, 1.0 / a.fps
+    while i < len(per):
+        t, norm, lines = per[i]
+        if len(norm) < a.min_chars:
+            i += 1
+            continue
+        j, end = i + 1, t + dt
+        while j < len(per) and per[j][1] == norm:
+            end = per[j][0] + dt
+            j += 1
+        x0 = min(l[1] for l in lines)
+        y0 = min(l[2] for l in lines)
+        x1 = max(l[1] + l[3] for l in lines)
+        y1 = max(l[2] + l[4] for l in lines)
+        telops.append({"id": len(telops), "start": round(t, 2), "end": round(end, 2),
+                       "text": " ".join(l[0] for l in lines),
+                       "box": [round(x0, 4), round(y0, 4), round(x1 - x0, 4), round(y1 - y0, 4)]})
+        i = j
+    out = os.path.join(a.outdir, "telops.json")
+    json.dump(telops, open(out, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+    print(out, f"{len(telops)}件(中身は全部読まず、件数と先頭数件だけ確認する)")
+
+
+def burn_telops(telops, ja, vw, vh, tmp, font_path):
+    """テロップの元位置を黒帯で隠し、日本語を重ねる画像を作る。(start, end, png) のリスト。"""
+    from PIL import Image, ImageDraw, ImageFont
+    res = []
+    for t in telops:
+        text = ja[t["id"]]
+        x, y, w, h = t["box"]
+        bx, by, bw, bh = int(x * vw), int(y * vh), int(w * vw), int(h * vh)
+        pad = max(6, bh // 4)
+        maxw = min(vw - 16, bw + pad * 4)
+        size = max(14, int(bh * 0.9))
+        while size > 14:
+            font = ImageFont.truetype(font_path, size)
+            box = ImageDraw.Draw(Image.new("RGBA", (1, 1))).multiline_textbbox(
+                (0, 0), text, font=font, spacing=size // 4, align="center")
+            if box[2] - box[0] <= maxw:
+                break
+            size -= 2
+        font = ImageFont.truetype(font_path, size)
+        img = Image.new("RGBA", (vw, vh), (0, 0, 0, 0))
+        d = ImageDraw.Draw(img)
+        box = d.multiline_textbbox((0, 0), text, font=font, spacing=size // 4, align="center")
+        tw, th = box[2] - box[0], box[3] - box[1]
+        cx, cy = bx + bw // 2, by + bh // 2
+        rw, rh = max(bw, tw) + pad * 2, max(bh, th) + pad * 2
+        rx = min(max(cx - rw // 2, 0), vw - rw)
+        ry = min(max(cy - rh // 2, 0), vh - rh)
+        d.rounded_rectangle([rx, ry, rx + rw, ry + rh], radius=pad, fill=(0, 0, 0, 235))
+        d.multiline_text((rx + (rw - tw) // 2 - box[0], ry + (rh - th) // 2 - box[1]), text,
+                         font=font, fill="white", spacing=size // 4, align="center")
+        p = os.path.join(tmp, f"telop_{t['id']:03}.png")
+        img.save(p)
+        res.append((t["start"], t["end"], p))
+    return res
+
+
+def burn(video, cues, out, width, ypos=0.86, telops=None, telop_ja=None):
     from PIL import Image, ImageDraw, ImageFont
     probe = subprocess.check_output(
         ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
@@ -170,14 +274,17 @@ def burn(video, cues, out, width, ypos=0.86):
         p = os.path.join(tmp, f"cue_{i:03}.png")
         img.save(p)
         pngs.append(p)
+    spans = [(c["start"], c["end"], p) for c, p in zip(cues, pngs)]
+    if telops:
+        spans = burn_telops(telops, telop_ja, vw, vh, tmp, font_path) + spans
     inputs = ["-i", video]
-    for p in pngs:
+    for _, _, p in spans:
         inputs += ["-i", p]
     chain, last = [], "0:v"
-    for i, c in enumerate(cues):
+    for i, (st, en, _) in enumerate(spans):
         nxt = f"v{i}"
         chain.append(f"[{last}][{i + 1}:v]overlay=0:0:"
-                     f"enable='between(t,{c['start']:.2f},{c['end']:.2f})'[{nxt}]")
+                     f"enable='between(t,{st:.2f},{en:.2f})'[{nxt}]")
         last = nxt
     run(["ffmpeg", "-loglevel", "error", "-y", *inputs,
          "-filter_complex", ";".join(chain), "-map", f"[{last}]", "-map", "0:a?",
@@ -197,7 +304,13 @@ def cmd_build(a):
     print(srt)
     if a.burn:
         out = os.path.join(a.outdir, "subtitled.mp4")
-        burn(a.burn, cues, out, a.width, a.y)
+        telops = telop_ja = None
+        if a.telops:
+            telops = json.load(open(a.telops, encoding="utf-8"))
+            if not a.telop_translations:
+                sys.exit("--telops には --telop-translations も必要です")
+            telop_ja = load_translations(a.telop_translations, len(telops))
+        burn(a.burn, cues, out, a.width, a.y, telops, telop_ja)
         print(out)
 
 
@@ -217,11 +330,24 @@ def main():
     t.add_argument("--model", default="small")
     t.add_argument("--language", default="English")
     t.set_defaults(fn=cmd_transcribe)
+    o = sub.add_parser("telop")
+    o.add_argument("video")
+    o.add_argument("--outdir", required=True)
+    o.add_argument("--fps", type=float, default=1.0)
+    o.add_argument("--min-text-height", type=float, default=0.025,
+                   help="これより小さい文字(画面高さ比)は背景の装飾として除外")
+    o.add_argument("--ymin", type=float, default=0.0, help="この高さ(0=上端)より下の文字だけ拾う")
+    o.add_argument("--ymax", type=float, default=1.0, help="この高さより上の文字だけ拾う")
+    o.add_argument("--min-chars", type=int, default=3,
+                   help="これより短い文字列(ロゴ・数字など)は無視")
+    o.set_defaults(fn=cmd_telop)
     b = sub.add_parser("build")
     b.add_argument("segments")
     b.add_argument("translations")
     b.add_argument("--outdir", required=True)
     b.add_argument("--burn", metavar="VIDEO", help="字幕焼き込みmp4も作る元動画")
+    b.add_argument("--telops", help="telop で作った telops.json(--burn と併用)")
+    b.add_argument("--telop-translations", help="テロップの日本語訳(translations.json と同形式)")
     b.add_argument("--width", type=int, default=20,
                    help="1行の全角文字数(横動画20 / 縦動画12〜14)")
     b.add_argument("--y", type=float, default=0.86,
