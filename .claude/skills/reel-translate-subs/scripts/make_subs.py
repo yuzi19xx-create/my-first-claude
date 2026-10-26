@@ -5,6 +5,8 @@
   fetch       URLから動画を取得する(yt-dlp + node)
   transcribe  動画から英語音声を文字起こしし、segments.json を作る
   telop       動画内の英語テロップをOCR(macOS Vision)して telops.json を作る
+  dub         日本語訳をmacOSの音声合成(say)で読み上げ、元音声を下げて重ねた
+              吹き替えmp4を作る(ローカル実行、トークン消費なし)
   build       segments.json + translations.json から字幕ファイルを作る
               --burn を付けると字幕焼き込みmp4も作る
               --telops / --telop-translations を付けると、テロップも元の位置に
@@ -55,8 +57,11 @@ def cmd_transcribe(a):
     audio = os.path.join(a.outdir, "audio.mp3")
     run(["ffmpeg", "-loglevel", "error", "-y", "-i", a.video, "-vn",
          "-ac", "1", "-ar", "16000", audio])
-    run([os.path.join(VENV_BIN, "whisper"), audio, "--language", a.language,
-         "--model", a.model, "--output_format", "json", "--output_dir", a.outdir])
+    cmd = [os.path.join(VENV_BIN, "whisper"), audio, "--language", a.language,
+           "--model", a.model, "--output_format", "json", "--output_dir", a.outdir]
+    if a.prompt:
+        cmd += ["--initial_prompt", a.prompt]
+    run(cmd)
     raw = json.load(open(os.path.join(a.outdir, "audio.json"), encoding="utf-8"))
     segs = [{"id": i, "start": round(s["start"], 2), "end": round(s["end"], 2),
              "text": s["text"].strip()} for i, s in enumerate(raw["segments"])]
@@ -292,6 +297,51 @@ def burn(video, cues, out, width, ypos=0.86, telops=None, telop_ja=None):
          "-c:a", "copy", out])
 
 
+def _duration(path):
+    return float(subprocess.check_output(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+         "-of", "csv=p=0", path], text=True).strip())
+
+
+def cmd_dub(a):
+    segs = json.load(open(a.segments, encoding="utf-8"))
+    ja = load_translations(a.translations, len(segs))
+    cues = adjust_cues(segs, ja)
+    os.makedirs(a.outdir, exist_ok=True)
+    tmp = tempfile.mkdtemp(prefix="dub_")
+    clips, warn = [], []
+    for i, c in enumerate(cues):
+        text = c["ja"].replace("\n", "")
+        raw = os.path.join(tmp, f"c{i:03}.aiff")
+        run(["say", "-v", a.voice, "-r", str(a.rate), "-o", raw, text])
+        dur = _duration(raw)
+        # 次の発言の頭までに収まるよう速める(上限 a.max_tempo)
+        room = (cues[i + 1]["start"] - 0.05 if i + 1 < len(cues)
+                else c["start"] + dur) - c["start"]
+        tempo = min(max(dur / room, 1.0), a.max_tempo)
+        if dur / tempo > room + 0.05:
+            warn.append(f"id{i}: {dur / tempo - room:.1f}秒はみ出し")
+        clips.append((c["start"], tempo, raw))
+    inputs = ["-i", a.video]
+    for _, _, raw in clips:
+        inputs += ["-i", raw]
+    chain = [f"[0:a]volume={a.orig_volume}[o]"]
+    labels = ["[o]"]
+    for i, (st, tempo, _) in enumerate(clips):
+        ms = int(st * 1000)
+        chain.append(f"[{i + 1}:a]atempo={tempo:.3f},volume={a.dub_volume},adelay={ms}|{ms}[d{i}]")
+        labels.append(f"[d{i}]")
+    chain.append("".join(labels) + f"amix=inputs={len(labels)}:normalize=0:"
+                 "duration=first[a]")
+    out = os.path.join(a.outdir, "dubbed.mp4")
+    run(["ffmpeg", "-loglevel", "error", "-y", *inputs, "-filter_complex",
+         ";".join(chain), "-map", "0:v", "-map", "[a]", "-c:v", "copy",
+         "-c:a", "aac", "-b:a", "192k", out])
+    print(out)
+    if warn:
+        print("次の発言に食い込む区間(訳を短くすると改善):", ", ".join(warn))
+
+
 def cmd_build(a):
     segs = json.load(open(a.segments, encoding="utf-8"))
     ja = load_translations(a.translations, len(segs))
@@ -329,6 +379,8 @@ def main():
     t.add_argument("--outdir", required=True)
     t.add_argument("--model", default="small")
     t.add_argument("--language", default="English")
+    t.add_argument("--prompt", default=None,
+                   help="固有名詞・専門用語のヒント(例: 'Marketo, Salesforce, API')。誤認識が減る")
     t.set_defaults(fn=cmd_transcribe)
     o = sub.add_parser("telop")
     o.add_argument("video")
@@ -341,6 +393,19 @@ def main():
     o.add_argument("--min-chars", type=int, default=3,
                    help="これより短い文字列(ロゴ・数字など)は無視")
     o.set_defaults(fn=cmd_telop)
+    d = sub.add_parser("dub")
+    d.add_argument("video", help="元動画(字幕焼き込み済みのsubtitled.mp4でも可)")
+    d.add_argument("segments")
+    d.add_argument("translations")
+    d.add_argument("--outdir", required=True)
+    d.add_argument("--voice", default="Kyoko", help="say の音声名(say -v '?' で一覧)")
+    d.add_argument("--rate", type=int, default=190, help="say の読み上げ速度(語/分)")
+    d.add_argument("--max-tempo", type=float, default=1.5,
+                   help="区間に収めるための最大倍速(これ以上は食い込みを警告)")
+    d.add_argument("--orig-volume", type=float, default=0.15,
+                   help="元音声の音量(0=無音〜1=そのまま)")
+    d.add_argument("--dub-volume", type=float, default=2.0, help="吹き替え音声の音量倍率")
+    d.set_defaults(fn=cmd_dub)
     b = sub.add_parser("build")
     b.add_argument("segments")
     b.add_argument("translations")
