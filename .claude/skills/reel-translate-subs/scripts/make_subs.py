@@ -22,6 +22,8 @@ import re
 import subprocess
 import sys
 import tempfile
+import urllib.parse
+import urllib.request
 
 VENV_BIN = os.path.expanduser("~/.venvs/reel-transcribe/bin")
 FONT_CANDIDATES = [
@@ -70,11 +72,13 @@ def cmd_transcribe(a):
     print(out)
 
 
-def load_translations(path, n):
+def load_translations(path, n, ids=None):
+    """ids を渡すと、その id の訳が揃っていればよい(連番でなくてもよい)。"""
     t = json.load(open(path, encoding="utf-8"))
     if isinstance(t, list):
         t = {str(i): v for i, v in enumerate(t)}
-    missing = [i for i in range(n) if not str(t.get(str(i), "")).strip()]
+    want = list(ids) if ids is not None else range(n)
+    missing = [i for i in want if not str(t.get(str(i), "")).strip()]
     if missing:
         sys.exit(f"translations.json に訳が無いid: {missing}")
     return {int(k): v.strip() for k, v in t.items()}
@@ -248,7 +252,8 @@ def burn_telops(telops, ja, vw, vh, tmp, font_path):
     return res
 
 
-def burn(video, cues, out, width, ypos=0.86, telops=None, telop_ja=None):
+def burn(video, cues, out, width, ypos=0.86, telops=None, telop_ja=None,
+         cover=None, plain=False):
     from PIL import Image, ImageDraw, ImageFont
     probe = subprocess.check_output(
         ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
@@ -257,7 +262,7 @@ def burn(video, cues, out, width, ypos=0.86, telops=None, telop_ja=None):
     font_path = next((p for p in FONT_CANDIDATES if os.path.exists(p)), None)
     if not font_path:
         sys.exit("日本語フォントが見つかりません(FONT_CANDIDATES を確認)")
-    size = max(18, int(min(vw, vh) * 0.055))
+    size = max(18, int(min(vw, vh) * 0.045))
     font = ImageFont.truetype(font_path, size)
     tmp = tempfile.mkdtemp(prefix="subs_")
     pngs = []
@@ -271,17 +276,41 @@ def burn(video, cues, out, width, ypos=0.86, telops=None, telop_ja=None):
         x, y = (vw - tw) // 2, int(vh * ypos) - th
         pad = size // 3
         y = max(y, pad + 4)
-        d.rounded_rectangle([x - pad, y - pad, x + tw + pad, y + th + pad],
-                            radius=pad, fill=(0, 0, 0, 190))
-        d.multiline_text((x - box[0], y - box[1]), text, font=font, fill="white",
-                         align="center", spacing=size // 4, stroke_width=3,
-                         stroke_fill="black")
+        if plain:
+            # 帯なし: ぼかした影 + 太い黒縁で背景の上でも読めるようにする
+            from PIL import ImageFilter
+            sh = Image.new("RGBA", (vw, vh), (0, 0, 0, 0))
+            ImageDraw.Draw(sh).multiline_text(
+                (x - box[0] + 3, y - box[1] + 4), text, font=font, fill="black",
+                align="center", spacing=size // 4, stroke_width=6, stroke_fill="black")
+            sh = sh.filter(ImageFilter.GaussianBlur(6))
+            img = Image.alpha_composite(Image.alpha_composite(img, sh), sh)
+            d = ImageDraw.Draw(img)
+            d.multiline_text((x - box[0], y - box[1]), text, font=font, fill="white",
+                             align="center", spacing=size // 4, stroke_width=4,
+                             stroke_fill="black")
+        else:
+            d.rounded_rectangle([x - pad, y - pad, x + tw + pad, y + th + pad],
+                                radius=pad, fill=(0, 0, 0, 190))
+            d.multiline_text((x - box[0], y - box[1]), text, font=font, fill="white",
+                             align="center", spacing=size // 4, stroke_width=3,
+                             stroke_fill="black")
         p = os.path.join(tmp, f"cue_{i:03}.png")
         img.save(p)
         pngs.append(p)
     spans = [(c["start"], c["end"], p) for c, p in zip(cues, pngs)]
     if telops:
         spans = burn_telops(telops, telop_ja, vw, vh, tmp, font_path) + spans
+    if cover:
+        # 英語テロップの帯を黒で隠す(字幕より下の層。動画全体に出す)
+        y0, y1 = cover
+        img = Image.new("RGBA", (vw, vh), (0, 0, 0, 0))
+        ImageDraw.Draw(img).rounded_rectangle(
+            [int(vw * 0.04), int(vh * y0), int(vw * 0.96), int(vh * y1)],
+            radius=12, fill=(0, 0, 0, 255))
+        p = os.path.join(tmp, "cover.png")
+        img.save(p)
+        spans = [(0, 1e6, p)] + spans
     inputs = ["-i", video]
     for _, _, p in spans:
         inputs += ["-i", p]
@@ -289,7 +318,7 @@ def burn(video, cues, out, width, ypos=0.86, telops=None, telop_ja=None):
     for i, (st, en, _) in enumerate(spans):
         nxt = f"v{i}"
         chain.append(f"[{last}][{i + 1}:v]overlay=0:0:"
-                     f"enable='between(t,{st:.2f},{en:.2f})'[{nxt}]")
+                     f"enable='gte(t,{st:.2f})*lt(t,{en:.2f})'[{nxt}]")
         last = nxt
     run(["ffmpeg", "-loglevel", "error", "-y", *inputs,
          "-filter_complex", ";".join(chain), "-map", f"[{last}]", "-map", "0:a?",
@@ -303,17 +332,83 @@ def _duration(path):
          "-of", "csv=p=0", path], text=True).strip())
 
 
+def voicevox_wav(text, speaker, speed, out, host):
+    """VOICEVOXエンジン(ローカル)で text を wav にする。"""
+    q = urllib.parse.urlencode({"text": text, "speaker": speaker})
+    req = urllib.request.Request(f"{host}/audio_query?{q}", method="POST")
+    query = json.load(urllib.request.urlopen(req, timeout=60))
+    query["speedScale"] = speed
+    req = urllib.request.Request(
+        f"{host}/synthesis?speaker={speaker}", data=json.dumps(query).encode(),
+        headers={"Content-Type": "application/json"}, method="POST")
+    with open(out, "wb") as f:
+        f.write(urllib.request.urlopen(req, timeout=120).read())
+
+
+def cmd_erase(a):
+    """telops.json の時間帯だけ、元の英語テロップの文字を delogo で消す。"""
+    import numpy as np
+    from PIL import Image
+    telops = json.load(open(a.telops, encoding="utf-8"))
+    probe = subprocess.check_output(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+         "stream=width,height", "-of", "csv=p=0", a.video], text=True).strip()
+    vw, vh = map(int, probe.split(","))
+    os.makedirs(a.outdir, exist_ok=True)
+    tmp = tempfile.mkdtemp(prefix="erase_")
+    filters = []
+    for t in telops:
+        bx, by, bw, bh = t["box"]
+        x0, x1 = int(vw * max(bx - 0.02, 0)), int(vw * min(bx + bw + 0.02, 1))
+        y0, y1 = int(vh * max(by - 0.015, 0)), int(vh * min(by + bh + 0.015, 1))
+        png = os.path.join(tmp, f"t{t['id']}.png")
+        mid = (t["start"] + t["end"]) / 2
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-ss", f"{mid:.2f}", "-i", a.video,
+                        "-frames:v", "1", png], check=True)
+        px = np.asarray(Image.open(png).convert("RGB"))[y0:y1, x0:x1].astype(int)
+        dark = (px.max(axis=2) < 50)  # 文字の黒い縁取り
+        # 細い線(操作画面のUI文字など)を除き、太い縁取りだけ残す(3x3収縮)
+        er = dark[1:-1, 1:-1].copy()
+        for dy in (0, 1, 2):
+            for dx in (0, 1, 2):
+                er &= dark[dy:dy + dark.shape[0] - 2, dx:dx + dark.shape[1] - 2]
+        dark = np.pad(er, 1)
+        ys, xs = np.where(dark)
+        if len(xs) < 20:
+            print(f"id{t['id']}: 文字を検出できず(スキップ)", file=sys.stderr)
+            continue
+        pad = a.pad
+        x = max(x0 + xs.min() - pad, 1)
+        y = max(y0 + ys.min() - pad, 1)
+        w = min(x0 + xs.max() + pad, vw - 2) - x
+        h = min(y0 + ys.max() + pad, vh - 2) - y
+        filters.append(f"delogo=x={x}:y={y}:w={w}:h={h}:"
+                       f"enable='gte(t,{t['start']:.2f})*lt(t,{t['end']:.2f})'")
+    out = os.path.join(a.outdir, "clean.mp4")
+    run(["ffmpeg", "-loglevel", "error", "-y", "-i", a.video,
+         "-vf", ",".join(filters), "-c:v", "libx264", "-crf", "18",
+         "-c:a", "copy", out])
+    print(out)
+
+
 def cmd_dub(a):
     segs = json.load(open(a.segments, encoding="utf-8"))
     ja = load_translations(a.translations, len(segs))
     cues = adjust_cues(segs, ja)
+    readings = [r.split("=", 1) for r in a.reading]
     os.makedirs(a.outdir, exist_ok=True)
     tmp = tempfile.mkdtemp(prefix="dub_")
     clips, warn = [], []
     for i, c in enumerate(cues):
         text = c["ja"].replace("\n", "")
-        raw = os.path.join(tmp, f"c{i:03}.aiff")
-        run(["say", "-v", a.voice, "-r", str(a.rate), "-o", raw, text])
+        for src, dst in readings:
+            text = text.replace(src, dst)
+        if a.engine == "voicevox":
+            raw = os.path.join(tmp, f"c{i:03}.wav")
+            voicevox_wav(text, a.speaker, a.speed, raw, a.voicevox_host)
+        else:
+            raw = os.path.join(tmp, f"c{i:03}.aiff")
+            run(["say", "-v", a.voice, "-r", str(a.rate), "-o", raw, text])
         dur = _duration(raw)
         # 次の発言の頭までに収まるよう速める(上限 a.max_tempo)
         room = (cues[i + 1]["start"] - 0.05 if i + 1 < len(cues)
@@ -359,8 +454,10 @@ def cmd_build(a):
             telops = json.load(open(a.telops, encoding="utf-8"))
             if not a.telop_translations:
                 sys.exit("--telops には --telop-translations も必要です")
-            telop_ja = load_translations(a.telop_translations, len(telops))
-        burn(a.burn, cues, out, a.width, a.y, telops, telop_ja)
+            telop_ja = load_translations(a.telop_translations, len(telops),
+                                      ids=[x["id"] for x in telops])
+        cover = [float(v) for v in a.cover_band.split(",")] if a.cover_band else None
+        burn(a.burn, cues, out, a.width, a.y, telops, telop_ja, cover, a.plain)
         print(out)
 
 
@@ -393,12 +490,26 @@ def main():
     o.add_argument("--min-chars", type=int, default=3,
                    help="これより短い文字列(ロゴ・数字など)は無視")
     o.set_defaults(fn=cmd_telop)
+    e = sub.add_parser("erase", help="元の英語テロップの文字を消す")
+    e.add_argument("video")
+    e.add_argument("telops", help="telop で作った telops.json(消したい時間帯のみ残す)")
+    e.add_argument("--outdir", required=True)
+    e.add_argument("--pad", type=int, default=16, help="文字の周りの余白(px)")
+    e.set_defaults(fn=cmd_erase)
     d = sub.add_parser("dub")
     d.add_argument("video", help="元動画(字幕焼き込み済みのsubtitled.mp4でも可)")
     d.add_argument("segments")
     d.add_argument("translations")
     d.add_argument("--outdir", required=True)
+    d.add_argument("--engine", choices=["say", "voicevox"], default="say",
+                   help="音声合成エンジン。voicevox はアプリを起動しておく(無料・ローカル)")
+    d.add_argument("--speaker", type=int, default=2,
+                   help="VOICEVOXの話者ID(一覧: curl localhost:50021/speakers)")
+    d.add_argument("--speed", type=float, default=1.0, help="VOICEVOXの話速(1.0=標準)")
+    d.add_argument("--voicevox-host", default="http://127.0.0.1:50021")
     d.add_argument("--voice", default="Kyoko", help="say の音声名(say -v '?' で一覧)")
+    d.add_argument("--reading", action="append", default=[], metavar="語=読み",
+                   help="読み上げだけ読みを変える(例: --reading Marketo=マルケト)。複数指定可")
     d.add_argument("--rate", type=int, default=190, help="say の読み上げ速度(語/分)")
     d.add_argument("--max-tempo", type=float, default=1.5,
                    help="区間に収めるための最大倍速(これ以上は食い込みを警告)")
@@ -415,6 +526,10 @@ def main():
     b.add_argument("--telop-translations", help="テロップの日本語訳(translations.json と同形式)")
     b.add_argument("--width", type=int, default=20,
                    help="1行の全角文字数(横動画20 / 縦動画12〜14)")
+    b.add_argument("--cover-band", metavar="上端,下端",
+                   help="元の英語テロップの帯を黒で隠す(例: 0.80,0.97)。字幕を同じ帯の中に出す時に使う")
+    b.add_argument("--plain", action="store_true",
+                   help="字幕に黒い箱を付けず、影と縁取りだけで表示する")
     b.add_argument("--y", type=float, default=0.86,
                    help="焼き込み字幕の下端の高さ(0=上端,1=下端)。元動画の下部に"
                         "英語テロップがある時は 0.2 など上側にずらす")
