@@ -215,7 +215,7 @@ def burn_telops(telops, ja, vw, vh, tmp, font_path):
         text = ja[t["id"]]
         x, y, w, h = t["box"]
         bx, by, bw, bh = int(x * vw), int(y * vh), int(w * vw), int(h * vh)
-        pad = max(6, bh // 4)
+        pad = max(8, bh // 3)
         maxw = min(vw - 16, bw + pad * 4)
         size = max(14, int(bh * 0.9))
         while size > 14:
@@ -234,7 +234,7 @@ def burn_telops(telops, ja, vw, vh, tmp, font_path):
         rw, rh = max(bw, tw) + pad * 2, max(bh, th) + pad * 2
         rx = min(max(cx - rw // 2, 0), vw - rw)
         ry = min(max(cy - rh // 2, 0), vh - rh)
-        d.rounded_rectangle([rx, ry, rx + rw, ry + rh], radius=pad, fill=(0, 0, 0, 235))
+        d.rounded_rectangle([rx, ry, rx + rw, ry + rh], radius=pad, fill=(0, 0, 0, 255))
         d.multiline_text((rx + (rw - tw) // 2 - box[0], ry + (rh - th) // 2 - box[1]), text,
                          font=font, fill="white", spacing=size // 4, align="center")
         p = os.path.join(tmp, f"telop_{t['id']:03}.png")
