@@ -41,15 +41,18 @@ h2{{margin:0 0 4px;font-size:18px}}.n{{display:inline-block;background:#d7263d;c
 details{{margin-top:12px;border-top:1px solid #eee;padding-top:8px}}summary{{cursor:pointer;font-weight:600;font-size:13px}}details p{{margin:6px 0;font-size:14px}}
 #bar{{position:sticky;top:0;z-index:5;background:#f4f4f6;padding:8px 0;display:flex;gap:12px;flex-wrap:wrap;align-items:center}}#bar video{{width:360px;max-width:100%;background:#000;border-radius:8px}}#ctl{{font-size:13px;display:flex;flex-direction:column;gap:6px}}#go{{padding:6px 10px;cursor:pointer}}section{{scroll-margin-top:230px}}section.on{{outline:3px solid #d7263d}}
 .row{{display:flex;gap:14px;flex-wrap:wrap}}.col{{flex:1 1 440px;min-width:0}}.lb{{font-size:12px;color:#888;margin-bottom:4px}}
-.col img{{width:100%;display:block;border:1px solid #ddd;border-radius:4px;aspect-ratio:16/9;object-fit:cover}}
+.col img{{cursor:zoom-in;width:100%;display:block;border:1px solid #ddd;border-radius:4px;aspect-ratio:16/9;object-fit:cover}}
 .jslide{{container-type:inline-size;position:relative;background:#fff;border:1px solid #ddd;border-left:10px solid #d7263d;border-radius:4px;aspect-ratio:16/9;box-sizing:border-box;}}.ji{{padding:3.5cqw 4cqw 6cqw;font-size:max(12px,2.3cqw);line-height:1.55}}
 .ji h3{{margin:0 0 .6em;font-size:1.5em;line-height:1.3;color:#111}}.ji p{{margin:.25em 0}}.ji ul{{margin:.25em 0;padding-left:1.3em}}.ji li::marker{{color:#d7263d}}.ft{{position:absolute;left:4cqw;bottom:1.5cqw;color:#d7263d;font-weight:700;font-size:.8em}}
+#lb{{position:fixed;inset:0;background:rgba(0,0,0,.88);display:none;align-items:center;justify-content:center;z-index:99;cursor:zoom-out}}#lb.on{{display:flex}}#lb img{{max-width:96vw;max-height:96vh;object-fit:contain;box-shadow:0 0 30px #000}}
 </style><header><h1>Marketo Fundamentals for AI(AI時代のMarketo基礎)— 日本語スライド資料</h1><p>MUGウェビナー 2026年5月 / スライドの日本語訳+発言の日本語訳。時刻をクリックすると動画の該当位置から再生します(動画 ../video と同じフォルダに video.mp4 を置いた場合)。※スライドの文字はOCRと目視をもとにした翻訳です。</p></header>
 <main><div id="bar"><video id="v" src="video.mp4" controls preload="none"></video><div id="ctl"><div id="cur">再生位置のスライド: -</div><label><input type="checkbox" id="follow" checked> 再生に合わせて自動でスクロール</label><button id="go">いまのスライドへ移動</button></div></div>
 <nav>{''.join(toc)}</nav>{''.join(cards)}</main>
+<div id="lb"><img alt=""></div>
 <script>const v=document.getElementById('v'),secs=[...document.querySelectorAll('section')],cur=document.getElementById('cur');let on=null;
 function upd(){{const t=v.currentTime;const s=secs.find(x=>t>=+x.dataset.a&&t<+x.dataset.b)||secs[0];if(s!==on){{if(on)on.classList.remove('on');s.classList.add('on');on=s;cur.textContent='再生位置のスライド: '+s.id.slice(1)+' / '+secs.length;if(document.getElementById('follow').checked)s.scrollIntoView({{behavior:'smooth',block:'start'}})}}}}
 v.addEventListener('timeupdate',upd);v.addEventListener('seeked',upd);document.getElementById('go').onclick=()=>{{upd();on&&on.scrollIntoView({{behavior:'smooth',block:'start'}})}};
+const lb=document.getElementById('lb');document.addEventListener('click',e=>{{if(e.target.closest('#lb')){{lb.classList.remove('on');return}}const im=e.target.closest('.col img');if(im){{lb.querySelector('img').src=im.src;lb.classList.add('on');return}}}});document.addEventListener('keydown',e=>{{if(e.key==='Escape')lb.classList.remove('on')}});
 document.addEventListener('click',e=>{{const a=e.target.closest('a[data-t]');if(!a)return;e.preventDefault();const v=document.getElementById('v');v.currentTime=+a.dataset.t;v.play();}})</script></html>'''
 open('out/index.html','w').write(page)
 print(len(PAGES),'pages')
