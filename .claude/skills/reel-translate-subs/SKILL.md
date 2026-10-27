@@ -138,6 +138,7 @@ $PY $S dub $W/video.mp4 $W/segments.json $W/translations.json --outdir $W   # �
 3. **描画**: `cd B && ~/.venvs/reel-transcribe/bin/python render.py 3 9 11`(番号省略で全ページ)→ `jaNN.jpg`。ブロックの範囲を、その中で最も多い背景色(量子化した最頻色)で塗りつぶし、ヒラギノで日本語を、枠に収まるまで縮めながら重ねる。numpyが要るのでvenvのpythonで実行する。
 4. **HTML**: `python3 build.py` → `out/index.html`(元画像と日本語版を左右に並べ、発言の訳を折りたたみ表示、時刻クリックで動画シーク、再生に合わせて自動スクロール)。f-string内の `{` `}` は二重にする。`out/video.mp4` を置く。
    - HTMLの視聴機能(`build.py` に実装済み): 画像クリックで拡大表示(ライトボックス)/「動画を拡大」ボタンまたは動画のダブルクリックで動画を拡大し、右側に再生位置の日本語スライドを並べる(下のスライダーで動画とスライドの比率を変更、設定はlocalStorageに保存、初期は動画36%)/動画の再生位置をlocalStorageに保存し、開き直すと前回の続きから再生できる/動画を長押し中(0.3秒以上)だけ2倍速(黄色い枠で表示、再生バー付近は対象外)。localStorageはtry/catchで囲んであり、使えなくても動く。
+   - **スマホ・複数端末で見る**: `python3 scripts/slides/serve.py out` で `0.0.0.0:8000` に簡易サーバーを起動し、同じWi-Fiのスマホから `http://MacのIP:8000/index.html` を開く(IPは `ipconfig getifaddr en0`)。標準の `http.server` は動画の途中再生(Range)に非対応なので、Range対応のこのサーバーを使う。再生位置はサーバー(`out` の1つ上の `pos.json`)にも保存され、スマホとパソコンで続きから再生できる(サーバー未使用の `file://` ではブラウザ保存のみ)。iPhoneは自動再生が制限されるため、時刻リンクで開いた後は再生ボタンを1回押す。
    - **マインドマップ(復習用)**: `python3 mindmap.py` → `out/mindmap.html`(別ファイル)。章 → 論点 → 小項目の折りたたみツリーで、各論点に時刻リンクが付く。リンクは `index.html#t=秒` で、開くと動画をその位置へシークして再生する。`index.html` のヘッダーからもリンクされている。章立て・内容は `mindmap.py` 冒頭のリスト変数 `D` にすべて書いてある。動画ごとに、スライドのタイトル・発言の訳・`times.txt` の各ページ開始時刻から `D` を作り直し、`python3 mindmap.py` を実行する(HTMLは直接編集しない)。形式:
      ```python
      D=[
